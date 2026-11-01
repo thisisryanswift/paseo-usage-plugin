@@ -166,7 +166,7 @@ test("fetch re-reads rotated credentials, uses provider endpoints, and leaves fi
     return new Response(JSON.stringify(String(url).includes("amazonaws") ? kiroQuota : agyQuota));
   };
   const sources = [createKiroUsageSource({ env: { HOME: root }, fetch: fetcher, now: () => NOW }),
-    createAntigravityUsageSource({ env: { HOME: root }, fetch: fetcher, now: () => NOW })];
+    createAntigravityUsageSource({ env: { HOME: root }, fetch: fetcher, now: () => NOW, cliVersion: async () => "9.9.9" })];
   const accounts = await Promise.all(sources.map((s) => s.discover({ kind: "global" })));
   await kiroStore(root, "rotated-kiro");
   await agyStore(root, "rotated-agy");
@@ -180,8 +180,8 @@ test("fetch re-reads rotated credentials, uses provider endpoints, and leaves fi
   assert.equal(new URL(calls[0].url).searchParams.get("profileArn"), ARN);
   assert.equal(new URL(calls[0].url).hostname, "codewhisperer.us-east-1.amazonaws.com");
   assert.equal(new Headers(calls[1].options?.headers).get("Authorization"), "Bearer rotated-agy");
-  assert.match(new Headers(calls[1].options?.headers).get("User-Agent")!, /^antigravity\//);
-  assert.equal(calls[1].url, "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary");
+  assert.equal(new Headers(calls[1].options?.headers).get("User-Agent"), "antigravity/cli/9.9.9");
+  assert.equal(calls[1].url, "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary");
   assert.equal(calls[1].options?.redirect, "error");
 });
 

@@ -1,20 +1,39 @@
 import path from "node:path";
 import { z } from "zod";
+import { execCommand } from "@getpaseo/plugin/server";
 import {
   hashAccountKey, toneFromUsedPct, unavailable, windowFromReportedDuration,
   type UsageReport, type UsageSourceRegistration, type UsageWindow,
 } from "@getpaseo/plugin/server/usage";
 import {
   environment, expired, failure, home, isoDate, jwtIdentity, missingFile, QuotaHttpError,
-  readJson, requestJson, storeInput, PLUGIN_USER_AGENT, type Environment, type Fetcher,
+  readJson, requestJson, storeInput, type Environment, type Fetcher,
 } from "./common";
 
 const loginSchema = z.object({
   token: z.object({ access_token: z.string().min(1), expiry: z.string().optional() }),
   id_token: z.string().optional(),
 });
-// Cloud Code requires an Antigravity client identifier even for read-only quota calls.
-const USER_AGENT = `antigravity/1.3.3 ${PLUGIN_USER_AGENT}`;
+// Cloud Code keys quota pools by client identity: only the CLI identity on the daily
+// endpoint reports the Gemini buckets alongside the Claude and GPT ("3p") ones.
+const QUOTA_BASE = "https://daily-cloudcode-pa.googleapis.com/v1internal:";
+// Used only when the installed agy version cannot be read.
+const FALLBACK_CLI_VERSION = "1.4.12";
+
+export async function installedAgyVersion(env: Environment): Promise<string> {
+  const override = env.AGY_USAGE_CLI_VERSION?.trim();
+  if (override) return override;
+  try {
+    const { stdout } = await execCommand("agy", ["--version"], { env: env as NodeJS.ProcessEnv, timeout: 5_000 });
+    return stdout.match(/\d+\.\d+\.\d+/)?.[0] ?? FALLBACK_CLI_VERSION;
+  } catch {
+    return FALLBACK_CLI_VERSION;
+  }
+}
+
+function userAgent(version: string): string {
+  return `antigravity/cli/${version}`;
+}
 // These endpoints use protobuf JSON: an omitted numeric scalar means zero.
 const fraction = z.number().finite().min(0).max(1).default(0);
 const summarySchema = z.object({ groups: z.array(z.object({
@@ -76,8 +95,9 @@ export function parseAntigravityModels(value: unknown): UsageReport {
     : unavailable({ kind: "no_quota", detail: "Antigravity did not report model quota information." });
 }
 
-export function createAntigravityUsageSource(options: { env?: Environment; fetch?: Fetcher; now?: () => number } = {}): UsageSourceRegistration {
+export function createAntigravityUsageSource(options: { env?: Environment; fetch?: Fetcher; now?: () => number; cliVersion?: () => Promise<string> } = {}): UsageSourceRegistration {
   const globalEnv = options.env ?? process.env;
+  const cliVersion = options.cliVersion ?? (() => installedAgyVersion(globalEnv));
   const fetcher = options.fetch ?? fetch;
   const now = options.now ?? Date.now;
   return {
@@ -102,15 +122,16 @@ export function createAntigravityUsageSource(options: { env?: Environment; fetch
         const problem = expired(login.expiresAt, "agy", now());
         if (problem) return problem;
         const signal = AbortSignal.timeout(15_000);
+        const agent = userAgent(await cliVersion());
         try {
           const report = parseAntigravitySummary(await requestJson(fetcher,
-            "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary", login.token, signal, {}, USER_AGENT));
+            `${QUOTA_BASE}retrieveUserQuotaSummary`, login.token, signal, {}, agent));
           if (report.status === "available") return report;
         } catch (error) {
           if (!(error instanceof QuotaHttpError && [404, 501].includes(error.status))) throw error;
         }
         return parseAntigravityModels(await requestJson(fetcher,
-          "https://cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels", login.token, signal, {}, USER_AGENT));
+          `${QUOTA_BASE}fetchAvailableModels`, login.token, signal, {}, agent));
       } catch (error) { return failure(error, "agy"); }
     },
   };
